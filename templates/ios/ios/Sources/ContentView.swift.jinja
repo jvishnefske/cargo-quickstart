@@ -1,0 +1,32 @@
+import SwiftUI
+
+struct ContentView: View {
+    @State private var name = "[[ project_name ]]"
+
+    private var greeting: String { RustCore.greeting(for: name) }
+    private var sum: Int32 { RustCore.add(2, 2) }
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Text("🦀 + 🍎")
+                .font(.system(size: 64))
+
+            Text(greeting)
+                .font(.title2)
+                .multilineTextAlignment(.center)
+
+            TextField("Your name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 260)
+
+            Text("Rust says 2 + 2 = \(sum)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        .padding()
+    }
+}
+
+#Preview {
+    ContentView()
+}

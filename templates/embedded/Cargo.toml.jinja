@@ -1,0 +1,23 @@
+[package]
+name = "[[ crate_name ]]"
+version = "0.1.0"
+edition = "[[ edition ]]"
+description = "[[ description ]]"
+authors = ["[[ author_name ]] <[[ author_email ]]>"]
+[%- if has_license %]
+license = "[[ license ]]"
+[%- endif %]
+
+[dependencies]
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "0.2"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Optimise for size; keep debug info for on-target debugging.
+[profile.release]
+opt-level = "s"
+lto = true
+debug = true

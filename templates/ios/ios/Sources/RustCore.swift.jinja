@@ -1,0 +1,21 @@
+import Foundation
+
+/// Safe Swift wrapper over the Rust C ABI declared in `rust_bridge.h`.
+///
+/// Keep all `unsafe` pointer handling and memory ownership in this one file so
+/// the rest of the app talks to a clean, idiomatic Swift API.
+enum RustCore {
+    /// Adds two integers in Rust.
+    static func add(_ left: Int32, _ right: Int32) -> Int32 {
+        rust_add(left, right)
+    }
+
+    /// Returns a greeting built in Rust, taking care of freeing the C string.
+    static func greeting(for name: String) -> String {
+        guard let raw = name.withCString({ rust_greeting($0) }) else {
+            return ""
+        }
+        defer { rust_string_free(raw) }
+        return String(cString: raw)
+    }
+}

@@ -1,0 +1,7 @@
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+rustflags = ["-C", "link-arg=-Tlink.x"]
+# Uncomment and set your chip to flash & run with `cargo run`:
+# runner = "probe-rs run --chip STM32F411RETx"

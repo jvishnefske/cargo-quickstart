@@ -1,0 +1,81 @@
+//! [[ description ]]
+//!
+//! Rust core for the **[[ project_name ]]** iOS app. Every public item here is
+//! exported with the C ABI and consumed from Swift through the bridging header
+//! at `include/rust_bridge.h`. Keep this surface small and string-based — it is
+//! the contract the SwiftUI front end depends on.
+
+use std::ffi::{CStr, CString, c_char};
+
+/// Adds two integers. Exposed to Swift as `rust_add`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_add(left: i32, right: i32) -> i32 {
+    left + right
+}
+
+/// Builds a greeting for `name` and returns it as a freshly-allocated C string.
+///
+/// # Safety
+/// `name` must be either null or a valid, NUL-terminated C string. The returned
+/// pointer is owned by the caller and must be released with exactly one call to
+/// [`rust_string_free`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_greeting(name: *const c_char) -> *mut c_char {
+    let name = if name.is_null() {
+        "world".to_owned()
+    } else {
+        // SAFETY: the caller guarantees a valid NUL-terminated string.
+        unsafe { CStr::from_ptr(name) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    let message = format!("Hello, {name}, from Rust 🦀");
+    CString::new(message).unwrap_or_default().into_raw()
+}
+
+/// Frees a string previously returned by this library.
+///
+/// # Safety
+/// `ptr` must be null or a pointer returned by [`rust_greeting`], and must not
+/// be used again after this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_string_free(ptr: *mut c_char) {
+    if ptr.is_null() {
+        return;
+    }
+    // SAFETY: `ptr` came from `CString::into_raw`, so reclaiming it is sound.
+    drop(unsafe { CString::from_raw(ptr) });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adds() {
+        assert_eq!(rust_add(2, 2), 4);
+    }
+
+    #[test]
+    fn greets_through_the_ffi_boundary() {
+        let name = CString::new("kata").expect("no interior NUL");
+        // SAFETY: `name` is a valid C string and we free the result exactly once.
+        unsafe {
+            let ptr = rust_greeting(name.as_ptr());
+            let got = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+            rust_string_free(ptr);
+            assert!(got.contains("kata"), "unexpected greeting: {got}");
+        }
+    }
+
+    #[test]
+    fn greets_null_as_world() {
+        // SAFETY: null is an allowed input; we free the result exactly once.
+        unsafe {
+            let ptr = rust_greeting(std::ptr::null());
+            let got = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+            rust_string_free(ptr);
+            assert!(got.contains("world"), "unexpected greeting: {got}");
+        }
+    }
+}

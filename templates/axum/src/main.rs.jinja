@@ -1,0 +1,31 @@
+//! [[ description ]]
+
+use axum::{Router, routing::get};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    let app = Router::new().route("/", get(root));
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    tracing::info!("listening on http://{}", listener.local_addr()?);
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn root() -> &'static str {
+    "Hello from [[ project_name ]]!"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn root_greets() {
+        assert!(root().await.contains("Hello"));
+    }
+}

@@ -1,0 +1,22 @@
+[package]
+name = "[[ crate_name ]]"
+version = "0.1.0"
+edition = "[[ edition ]]"
+description = "[[ description ]]"
+authors = ["[[ author_name ]] <[[ author_email ]]>"]
+[%- if has_license %]
+license = "[[ license ]]"
+[%- endif %]
+
+[dependencies]
+anyhow = "1"
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

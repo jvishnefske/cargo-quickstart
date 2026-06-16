@@ -1,0 +1,20 @@
+[package]
+name = "[[ crate_name ]]"
+version = "0.1.0"
+edition = "[[ edition ]]"
+description = "[[ description ]]"
+authors = ["[[ author_name ]] <[[ author_email ]]>"]
+[%- if has_license %]
+license = "[[ license ]]"
+[%- endif %]
+
+[dependencies]
+
+[dev-dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

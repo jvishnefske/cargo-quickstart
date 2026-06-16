@@ -1,0 +1,23 @@
+//! [[ description ]]
+
+/// Adds two numbers together.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!([[ crate_name ]]::add(2, 2), 4);
+/// ```
+#[must_use]
+pub fn add(left: i64, right: i64) -> i64 {
+    left + right
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_adds() {
+        assert_eq!(add(2, 2), 4);
+    }
+}

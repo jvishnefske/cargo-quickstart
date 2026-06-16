@@ -1,0 +1,17 @@
+//! [[ description ]]
+
+fn main() {
+    // Forward Rust panics to the browser console for readable stack traces.
+    console_error_panic_hook::set_once();
+
+    let window = web_sys::window().expect("no global `window`");
+    let document = window.document().expect("window has no document");
+    let body = document.body().expect("document has no body");
+
+    let heading = document
+        .create_element("h1")
+        .expect("failed to create element");
+    heading.set_text_content(Some("Hello from [[ project_name ]] 🦀"));
+    body.append_child(&heading)
+        .expect("failed to append heading");
+}

@@ -1,0 +1,27 @@
+# XcodeGen spec — run `xcodegen generate` to (re)create [[ name_pascal ]].xcodeproj.
+# Install once with `brew install xcodegen`. The .xcodeproj is generated and
+# git-ignored; this file is the source of truth.
+name: [[ name_pascal ]]
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "16.0"
+
+targets:
+  [[ name_pascal ]]:
+    type: application
+    platform: iOS
+    sources:
+      - ios/Sources
+    dependencies:
+      # Built by build-rust.sh; run it before generating/building.
+      - framework: ios/Frameworks/RustCore.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.[[ crate_name ]]
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_OBJC_BRIDGING_HEADER: ios/Sources/Bridging-Header.h
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_CFBundleDisplayName: [[ name_pascal ]]
+        TARGETED_DEVICE_FAMILY: "1,2"

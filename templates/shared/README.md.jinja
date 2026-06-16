@@ -1,0 +1,53 @@
+# [[ project_name ]]
+
+[[ description ]]
+[% if ci %]
+![CI](https://github.com/OWNER/[[ project_name ]]/actions/workflows/ci.yml/badge.svg)
+[% endif %]
+## Getting started
+
+```sh
+[% if kind == "wasm" -%]
+trunk serve            # live-reloading dev server at http://localhost:8080
+trunk build --release  # production bundle in ./dist
+[%- elif kind == "embedded" -%]
+cargo build --release  # cross-compiles for thumbv7em-none-eabihf
+# flash/run with your probe, e.g. `cargo run` once you set a runner in .cargo/config.toml
+[%- elif kind == "axum" -%]
+cargo run              # serves on http://localhost:3000
+[%- elif kind == "ios" -%]
+cargo test             # build & test the Rust core (CI-verified)
+bash build-rust.sh     # cross-compile the core into ios/Frameworks/RustCore.xcframework
+xcodegen generate      # generate [[ name_pascal ]].xcodeproj from project.yml
+open [[ name_pascal ]].xcodeproj   # then ⌘R to run the SwiftUI app in the Simulator
+[%- elif kind == "lib" -%]
+cargo test             # runs unit tests + doctests
+cargo doc --open       # build & view the API docs
+[%- else -%]
+cargo run -- --help
+[%- endif %]
+```
+
+## Development
+
+```sh
+cargo fmt --all          # format
+cargo clippy --all-targets -- -D warnings   # lint
+cargo test               # test
+```
+[% if hooks %]
+Git pre-commit hooks (in `.githooks/`) run `cargo fmt --check`, `cargo clippy`,
+and `cargo check` before every commit. They activate automatically after your
+first clone once you run:
+
+```sh
+git config core.hooksPath .githooks
+```
+(already configured in this repo by `cargo quickstart`).
+[% endif %]
+[% if has_license %]
+## License
+
+Licensed under [[ license ]].
+[% if license_mit %]See [LICENSE-MIT](LICENSE-MIT)[% if license_apache %] and [LICENSE-APACHE](LICENSE-APACHE)[% endif %].[% elif license_apache %]See [LICENSE-APACHE](LICENSE-APACHE).[% endif %]
+[% endif %]

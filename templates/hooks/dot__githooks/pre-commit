@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Installed by `cargo quickstart`. Runs before every `git commit`.
+# Bypass once with `git commit --no-verify` if you really need to.
+set -euo pipefail
+
+echo "pre-commit ▸ cargo fmt --check"
+cargo fmt --all -- --check
+
+echo "pre-commit ▸ cargo clippy"
+cargo clippy --all-targets -- -D warnings
+
+echo "pre-commit ▸ cargo check"
+cargo check --all-targets
+
+echo "pre-commit ▸ ok"

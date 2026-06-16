@@ -1,0 +1,8 @@
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+[%- if kind == "wasm" %]
+targets = ["wasm32-unknown-unknown"]
+[%- elif kind == "embedded" %]
+targets = ["thumbv7em-none-eabihf"]
+[%- endif %]

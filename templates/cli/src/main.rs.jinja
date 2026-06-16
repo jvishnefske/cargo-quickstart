@@ -1,0 +1,29 @@
+//! [[ description ]]
+
+use clap::Parser;
+
+/// [[ description ]]
+#[derive(Debug, Parser)]
+#[command(version, about)]
+struct Args {
+    /// Who to greet.
+    #[arg(default_value = "world")]
+    name: String,
+}
+
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    println!("Hello, {}!", args.name);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_default_name() {
+        let args = Args::parse_from(["[[ crate_name ]]"]);
+        assert_eq!(args.name, "world");
+    }
+}
