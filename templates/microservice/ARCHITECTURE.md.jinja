@@ -1,79 +1,99 @@
 # [[ project_name ]] — architecture
 
-A 12-factor microservice in Rust: **axum** HTTP, a **`Stream`/`Sink` message
-bus**, **SeaORM** persistence over multiple backends, and **Kubernetes**
-manifests with health/readiness probes and autoscaling.
+A 12-factor Rust microservice with a **transport-agnostic** messaging core: the
+domain code talks to one `Transport` trait and one `MessageEnvelope` DTO, never
+to ports, sockets, subjects, or HTTP. The same binary therefore runs behind an L7
+load balancer, as an outbound-only broker client, or as in-process tasks —
+selected by configuration, not by editing call sites.
 
 ## Layout
 
 ```
 src/
-  main.rs        HTTP routes, wiring, graceful shutdown
-  config.rs      all configuration, read from the environment
-  messaging.rs   the Stream/Sink bus + `Traced` tracing middleware
-  model.rs       SeaORM entity + connect/insert/list
-k8s/             ConfigMap, Secret, Deployment, Service, HPA, kustomization
-Dockerfile       multi-stage build → distroless non-root image
-.env.example     local configuration template
+  main.rs              HTTP routes, workers, wiring, graceful shutdown
+  config.rs            all configuration, read from the environment
+  model.rs             SeaORM entity + connect/insert/list/count
+  transport.rs         MessageEnvelope, Transport trait, TracedTransport layer
+  transport/memory.rs  in-process bus (default; correlation + timeout)
+  transport/nats.rs    NATS broker adapter (feature `transport-nats`)
+k8s/                   ConfigMap, Secret, Deployment, Service, HPA, kustomization
+Dockerfile             multi-stage build → distroless non-root image
 ```
 
-## Messaging — `Stream` / `Sink`
+## The transport abstraction
 
-The bus is defined purely in terms of `futures::Stream` (receive) and
-`futures::Sink` (send), so the transport is pluggable:
+Everything crosses boundaries as a `MessageEnvelope` (id, correlation id, type,
+topic, `reply_to`, `bytes::Bytes` payload, metadata). One trait carries all three
+interaction patterns:
 
-- **Publish** is `SinkExt::send` on a `Sink<Event>`.
-- **Subscribe** is consuming a `Stream<Item = Event>` with `StreamExt`
-  combinators (`filter`, `map`, `for_each`, `buffered`, …).
-- **`Traced<S>`** is middleware: it wraps any inner stream or sink and emits a
-  `tracing` event for every message, without the producer or consumer knowing.
-
-The default transport is an in-process `futures::channel::mpsc`. To move to a
-real broker (NATS, Kafka, Redis Streams), provide a type that implements
-`Stream`/`Sink` for that broker — **no call site changes**, and `Traced` keeps
-instrumenting it.
+| Pattern            | `MessageType` | Method                  | Guarantee                     |
+|--------------------|---------------|-------------------------|-------------------------------|
+| publish/subscribe  | `Event`       | `publish` + `subscribe` | fire-and-forget, one-to-many  |
+| request/response   | `Query`       | `request`               | point-to-point reply          |
+| command/reply      | `Command`     | `request`               | acknowledged state change     |
 
 ```rust
-// publish
-let mut tx = Traced::new(state.tx.clone(), "events");
-tx.send(Event { /* … */ }).await?;
-
-// subscribe
-Traced::new(rx, "events")
-    .filter(|ev| futures::future::ready(!ev.name.is_empty()))
-    .for_each(|ev| async move { /* handle */ })
-    .await;
+#[async_trait]
+pub trait Transport: Send + Sync + 'static {
+    async fn publish(&self, envelope: MessageEnvelope) -> Result<(), DynError>;
+    async fn subscribe(&self, topic: &str) -> Result<BoxStream<'static, MessageEnvelope>, DynError>;
+    async fn request(&self, envelope: MessageEnvelope) -> Result<MessageEnvelope, DynError>;
+}
 ```
+
+`main.rs` demonstrates each: `POST /items` is a **command** (acked write that
+also emits an event), the event is consumed by a **subscribe** worker, and
+`GET /items/count` is a **request/response** query answered by another worker.
+
+### Cross-cutting concerns as layers
+
+`TracedTransport<T>` wraps any `Transport` and emits a `tracing` event for every
+message — telemetry with zero changes to the inner transport or the domain code.
+Auth, rate-limiting, and retries follow the same decorator pattern (in a larger
+system, as Tower layers keyed off `poll_ready` for backpressure).
+
+## Adapters
+
+- **`MemoryTransport`** (default, no dependencies): a `tokio::broadcast` bus
+  filtered by topic. `request` registers a correlation id against a `oneshot`
+  and **bounds the registry with a hard timeout** (`REQUEST_TIMEOUT_SECS`), so an
+  abandoned request (dropped reply, crashed peer, partition) is always pruned —
+  memory cannot grow without bound.
+- **`NatsTransport`** (`--features transport-nats`): outbound-only broker client.
+  `subscribe` joins a **queue group** so the broker load-balances each message to
+  one healthy replica; `request` uses NATS' native inbox request/reply.
+
+Switch transports with configuration alone: build with `transport-nats` and set
+`NATS_URL`, and the workers/handlers are byte-for-byte identical.
+
+## Deployment topologies
+
+| Criterion        | L7 load balancer (HTTP)        | Broker (NATS) ingress           | In-process            |
+|------------------|--------------------------------|---------------------------------|-----------------------|
+| Listening port   | required (TCP)                 | none (outbound only)            | none                  |
+| Load balancing   | L7 HTTP/2 stream splitting     | broker queue groups             | Tokio task scheduling |
+| Service discovery| DNS / service mesh             | implicit via topics             | n/a                   |
+| Attack surface   | open port                      | minimal (no inbound)            | none                  |
 
 ## Persistence — SeaORM, multiple backends
 
-`model.rs` defines a SeaORM entity once. The backend is chosen at **runtime**
-from the `DATABASE_URL` scheme (`postgres://`, `mysql://`, `sqlite://`), and the
-table is created from the entity with backend-appropriate DDL. Cargo features
-(`backend-postgres`, `backend-mysql`, `backend-sqlite`) control which drivers are
-compiled in; the default build includes Postgres and SQLite.
-
-## Endpoints
-
-| Route | Purpose |
-|---|---|
-| `GET /healthz` | Liveness — process is up. |
-| `GET /readyz` | Readiness — returns 503 until the database answers a ping. |
-| `POST /items` | `{"name": "…"}` → inserts a row and publishes an `item.created` event. |
-| `GET /items` | Lists stored items. |
+`model.rs` defines a SeaORM entity once; the backend is chosen at runtime from
+`DATABASE_URL` (`postgres://`, `mysql://`, `sqlite://`) and the table is created
+per-backend from the entity. Cargo features (`backend-postgres`, `backend-mysql`,
+`backend-sqlite`) gate which drivers compile in.
 
 ## 12-factor mapping
 
 | Factor | Where |
 |---|---|
-| III Config | `config.rs` — everything from env vars |
-| IV Backing services | DB via `DATABASE_URL`; bus is swappable |
+| III Config | `config.rs` — env only |
+| IV Backing services | DB via `DATABASE_URL`; bus via transport selection |
 | V Build/release/run | multi-stage `Dockerfile` |
-| VI Processes | stateless; all state in the DB / bus |
-| VII Port binding | binds `PORT` (default 8080) |
-| VIII Concurrency | tokio tasks; scale via replicas / HPA |
+| VI Processes | stateless; state in DB / bus |
+| VII Port binding | binds `PORT` (HTTP ingress) |
+| VIII Concurrency | tokio tasks; scale via replicas / HPA / queue groups |
 | IX Disposability | graceful shutdown on SIGTERM |
-| XI Logs | `tracing` to stdout |
+| XI Logs | `tracing` to stdout; `TracedTransport` spans |
 | XII Admin processes | schema bootstrap at startup |
 
 ## Run it
@@ -82,13 +102,20 @@ compiled in; the default build includes Postgres and SQLite.
 cp .env.example .env
 cargo run
 
-curl -sXPOST localhost:8080/items -H 'content-type: application/json' -d '{"name":"hello"}'
+curl -sXPOST localhost:8080/items -H 'content-type: application/json' -d '{"name":"alpha"}'
 curl -s localhost:8080/items
+curl -s localhost:8080/items/count
+```
+
+Broker mode:
+
+```sh
+cargo run --features transport-nats     # with NATS_URL=nats://localhost:4222 set
 ```
 
 ## Deploy
 
 ```sh
 docker build -t [[ project_name ]]:latest .
-kubectl apply -k k8s/      # edit k8s/secret.yaml first (use a real DATABASE_URL)
+kubectl apply -k k8s/      # edit k8s/secret.yaml first (real DATABASE_URL)
 ```

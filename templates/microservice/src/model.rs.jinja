@@ -4,7 +4,9 @@
 //! entity definition (no hand-written, dialect-specific DDL).
 
 use sea_orm::entity::prelude::*;
-use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Schema, Set};
+use sea_orm::{
+    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, PaginatorTrait, Schema, Set,
+};
 
 /// The `items` table.
 pub mod item {
@@ -60,4 +62,8 @@ pub async fn insert_item(db: &DatabaseConnection, name: String) -> anyhow::Resul
 
 pub async fn list_items(db: &DatabaseConnection) -> anyhow::Result<Vec<item::Model>> {
     Ok(item::Entity::find().all(db).await?)
+}
+
+pub async fn count_items(db: &DatabaseConnection) -> anyhow::Result<u64> {
+    Ok(item::Entity::find().count(db).await?)
 }

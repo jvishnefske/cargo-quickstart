@@ -1,0 +1,171 @@
+//! Transport-agnostic messaging.
+//!
+//! The domain code talks to one [`Transport`] interface and a single
+//! [`MessageEnvelope`] DTO; it never sees ports, sockets, subjects, or HTTP. The
+//! same binary can therefore run behind an L7 load balancer (HTTP/gRPC ingress),
+//! as an outbound-only broker client (NATS), or as in-process tasks — selected
+//! by configuration, not by changing call sites.
+//!
+//! Three interaction patterns ride on the one trait:
+//!
+//! | Pattern          | `MessageType` | Method            | Guarantee                  |
+//! |------------------|---------------|-------------------|----------------------------|
+//! | publish/subscribe| `Event`       | `publish`/`subscribe` | fire-and-forget, fan-out |
+//! | request/response | `Query`       | `request`         | point-to-point reply       |
+//! | command/reply    | `Command`     | `request`         | acknowledged state change  |
+
+use std::collections::HashMap;
+use std::error::Error as StdError;
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::StreamExt;
+use futures::stream::BoxStream;
+use serde::{Deserialize, Serialize};
+
+pub mod memory;
+#[cfg(feature = "transport-nats")]
+pub mod nats;
+
+/// Boxed transport error — adapters surface their native errors through this.
+pub type DynError = Box<dyn StdError + Send + Sync>;
+
+/// Correlates a request with its eventual reply.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct CorrelationId(pub String);
+
+impl CorrelationId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+}
+
+impl Default for CorrelationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The intent of a message, independent of any wire protocol.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MessageType {
+    Event,
+    Query,
+    Command,
+}
+
+/// The single DTO that crosses every transport boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageEnvelope {
+    pub message_id: String,
+    pub correlation_id: Option<CorrelationId>,
+    pub message_type: MessageType,
+    pub topic: String,
+    pub reply_to: Option<String>,
+    /// `Bytes` is cheap to clone and supports zero-copy slicing across boundaries.
+    pub payload: Bytes,
+    pub metadata: HashMap<String, String>,
+}
+
+impl MessageEnvelope {
+    pub fn new(message_type: MessageType, topic: impl Into<String>, payload: Bytes) -> Self {
+        Self {
+            message_id: uuid::Uuid::new_v4().to_string(),
+            correlation_id: None,
+            message_type,
+            topic: topic.into(),
+            reply_to: None,
+            payload,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// A fire-and-forget event.
+    pub fn event(topic: impl Into<String>, payload: Bytes) -> Self {
+        Self::new(MessageType::Event, topic, payload)
+    }
+
+    /// A request that expects a reply (read query).
+    pub fn query(topic: impl Into<String>, payload: Bytes) -> Self {
+        let mut e = Self::new(MessageType::Query, topic, payload);
+        e.correlation_id = Some(CorrelationId::new());
+        e
+    }
+
+    /// A state-changing command that expects an acknowledgement.
+    pub fn command(topic: impl Into<String>, payload: Bytes) -> Self {
+        let mut e = Self::new(MessageType::Command, topic, payload);
+        e.correlation_id = Some(CorrelationId::new());
+        e
+    }
+
+    /// Build the reply to this envelope: routed to its `reply_to`, same
+    /// correlation id. Returns `None` if the sender expected no reply.
+    pub fn reply(&self, payload: Bytes) -> Option<Self> {
+        let topic = self.reply_to.clone()?;
+        Some(Self {
+            message_id: uuid::Uuid::new_v4().to_string(),
+            correlation_id: self.correlation_id.clone(),
+            message_type: self.message_type,
+            topic,
+            reply_to: None,
+            payload,
+            metadata: HashMap::new(),
+        })
+    }
+}
+
+/// The uniform transport interface. Implementors handle protocol framing,
+/// routing, and (for `request`) correlation.
+#[async_trait]
+pub trait Transport: Send + Sync + 'static {
+    /// Publish to a logical topic (fire-and-forget).
+    async fn publish(&self, envelope: MessageEnvelope) -> Result<(), DynError>;
+
+    /// Subscribe to a topic, yielding a stream of envelopes.
+    async fn subscribe(&self, topic: &str)
+    -> Result<BoxStream<'static, MessageEnvelope>, DynError>;
+
+    /// Send a request and await its correlated reply (request/response and
+    /// command/reply).
+    async fn request(&self, envelope: MessageEnvelope) -> Result<MessageEnvelope, DynError>;
+}
+
+/// A protocol-agnostic telemetry layer: wraps any [`Transport`] and records a
+/// `tracing` span/event for every message, without the inner transport or the
+/// domain code knowing. The pattern other cross-cutting concerns (auth,
+/// rate-limiting) would follow.
+pub struct TracedTransport<T> {
+    inner: T,
+}
+
+impl<T> TracedTransport<T> {
+    pub fn new(inner: T) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl<T: Transport> Transport for TracedTransport<T> {
+    async fn publish(&self, envelope: MessageEnvelope) -> Result<(), DynError> {
+        tracing::debug!(topic = %envelope.topic, kind = ?envelope.message_type, "publish");
+        self.inner.publish(envelope).await
+    }
+
+    async fn subscribe(
+        &self,
+        topic: &str,
+    ) -> Result<BoxStream<'static, MessageEnvelope>, DynError> {
+        tracing::debug!(topic, "subscribe");
+        let stream = self.inner.subscribe(topic).await?;
+        let label = topic.to_string();
+        Ok(Box::pin(stream.inspect(move |env| {
+            tracing::trace!(topic = %label, id = %env.message_id, "received");
+        })))
+    }
+
+    async fn request(&self, envelope: MessageEnvelope) -> Result<MessageEnvelope, DynError> {
+        tracing::debug!(topic = %envelope.topic, corr = ?envelope.correlation_id, "request");
+        self.inner.request(envelope).await
+    }
+}

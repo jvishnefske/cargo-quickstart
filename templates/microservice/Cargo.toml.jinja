@@ -10,18 +10,28 @@ license = "[[ license ]]"
 
 [features]
 # Database backends. SeaORM selects one at runtime from DATABASE_URL's scheme;
-# these gate which drivers are compiled in. Build with --no-default-features
-# --features backend-mysql (etc.) to slim the binary to a single backend.
+# these gate which drivers are compiled in.
 default = ["backend-postgres", "backend-sqlite"]
 backend-postgres = ["sea-orm/sqlx-postgres"]
 backend-mysql = ["sea-orm/sqlx-mysql"]
 backend-sqlite = ["sea-orm/sqlx-sqlite"]
+# Out-of-process broker transport. Off by default so the service builds and runs
+# on the in-memory transport with no external dependencies.
+transport-nats = ["dep:async-nats"]
 
 [dependencies]
 axum = "0.7"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
-pin-project-lite = "0.2"
+async-trait = "0.1"
+bytes = { version = "1", features = ["serde"] }
 sea-orm = { version = "1", default-features = false, features = [
     "runtime-tokio-rustls",
     "macros",
@@ -32,6 +42,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
+async-nats = { version = "0.38", optional = true }
 
 [lints.rust]
 unsafe_code = "forbid"

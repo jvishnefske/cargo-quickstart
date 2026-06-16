@@ -1,27 +1,41 @@
 //! [[ description ]]
 //!
-//! A 12-factor microservice: configuration from the environment, structured logs
-//! to stdout, a Stream/Sink message bus, SeaORM persistence, Kubernetes health
-//! and readiness probes, and graceful shutdown on SIGTERM.
+//! A 12-factor microservice built on a transport-agnostic message layer: the
+//! HTTP handlers, the background workers, and the domain logic all speak the
+//! [`Transport`] trait, so the same binary runs over an in-process bus or a NATS
+//! broker (feature `transport-nats`) with no code changes. See ARCHITECTURE.md.
+//!
+//! It exercises all three interaction patterns:
+//! - command/reply: `POST /items` sends an `items.create` command, acked with the row.
+//! - publish/subscribe: the command handler emits an `items.events` event.
+//! - request/response: `GET /items/count` queries `items.count`.
 
 mod config;
-mod messaging;
 mod model;
+mod transport;
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
-use futures::{SinkExt, StreamExt};
+use bytes::Bytes;
+use futures::StreamExt;
 use sea_orm::DatabaseConnection;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use config::Config;
-use messaging::{Event, Traced};
+use transport::memory::MemoryTransport;
+use transport::{MessageEnvelope, TracedTransport, Transport};
+
+/// Command: create an item (acknowledged write).
+const ITEMS_CREATE: &str = "items.create";
+/// Event: "an item was created" (fire-and-forget, one-to-many).
+const ITEMS_EVENTS: &str = "items.events";
+/// Query: "how many items?" (request/response).
+const ITEMS_COUNT: &str = "items.count";
 
 #[derive(Clone)]
 struct AppState {
     db: DatabaseConnection,
-    /// Publish half of the bus. Cloning a `Sender` is how futures' mpsc supports
-    /// multiple producers.
-    tx: futures::channel::mpsc::Sender<Event>,
+    transport: Arc<dyn Transport>,
 }
 
 #[tokio::main]
@@ -37,27 +51,19 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(app = %cfg.app_name, addr = %cfg.bind_addr, "starting");
 
     let db = model::connect(&cfg.database_url).await?;
+    let transport = build_transport(&cfg).await?;
 
-    // The bus: a Sink to publish, a Stream to consume. Swap the channel for
-    // NATS/Kafka/Redis by supplying any Stream/Sink — call sites don't change.
-    let (tx, rx) = messaging::channel(cfg.bus_buffer);
+    spawn_workers(&db, &transport).await?;
 
-    // Subscriber task. `Traced` instruments every message; StreamExt combinators
-    // (`filter`, `for_each`) express the processing pipeline.
-    tokio::spawn(async move {
-        Traced::new(rx, "events")
-            .filter(|ev| futures::future::ready(!ev.name.is_empty()))
-            .for_each(|ev| async move {
-                tracing::info!(id = %ev.id, kind = %ev.kind, name = %ev.name, "event handled");
-            })
-            .await;
-    });
-
-    let state = AppState { db, tx };
+    let state = AppState {
+        db,
+        transport: transport.clone(),
+    };
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
         .route("/items", get(list_items).post(create_item))
+        .route("/items/count", get(count_items))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
@@ -66,6 +72,98 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// Background workers, all expressed purely against the [`Transport`] trait.
+async fn spawn_workers(
+    db: &DatabaseConnection,
+    transport: &Arc<dyn Transport>,
+) -> anyhow::Result<()> {
+    // Command/reply: insert an item (acknowledged write) and emit an event.
+    {
+        let db = db.clone();
+        let transport = transport.clone();
+        let mut commands = transport
+            .subscribe(ITEMS_CREATE)
+            .await
+            .map_err(|e| anyhow::anyhow!("subscribe {ITEMS_CREATE}: {e}"))?;
+        tokio::spawn(async move {
+            while let Some(cmd) = commands.next().await {
+                let name = String::from_utf8_lossy(&cmd.payload).into_owned();
+                match model::insert_item(&db, name).await {
+                    Ok(item) => {
+                        let body = Bytes::from(serde_json::to_vec(&item).unwrap_or_default());
+                        // Notify subscribers (decoupled), then ACK the command.
+                        let _ = transport
+                            .publish(MessageEnvelope::event(ITEMS_EVENTS, body.clone()))
+                            .await;
+                        if let Some(reply) = cmd.reply(body) {
+                            let _ = transport.publish(reply).await;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("command {ITEMS_CREATE} failed: {e}");
+                        // NACK: empty reply. A production system would route to a
+                        // dead-letter queue and return a typed error envelope.
+                        if let Some(reply) = cmd.reply(Bytes::new()) {
+                            let _ = transport.publish(reply).await;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Publish/subscribe: react to item.created events.
+    {
+        let mut events = transport
+            .subscribe(ITEMS_EVENTS)
+            .await
+            .map_err(|e| anyhow::anyhow!("subscribe {ITEMS_EVENTS}: {e}"))?;
+        tokio::spawn(async move {
+            while let Some(ev) = events.next().await {
+                tracing::info!(id = %ev.message_id, "event handled");
+            }
+        });
+    }
+
+    // Request/response: answer item-count queries from the database.
+    {
+        let db = db.clone();
+        let transport = transport.clone();
+        let mut queries = transport
+            .subscribe(ITEMS_COUNT)
+            .await
+            .map_err(|e| anyhow::anyhow!("subscribe {ITEMS_COUNT}: {e}"))?;
+        tokio::spawn(async move {
+            while let Some(req) = queries.next().await {
+                let count = model::count_items(&db).await.unwrap_or(0);
+                if let Some(reply) = req.reply(Bytes::from(count.to_string())) {
+                    let _ = transport.publish(reply).await;
+                }
+            }
+        });
+    }
+
+    Ok(())
+}
+
+/// Pick the transport from configuration. The in-memory bus is the default; the
+/// NATS broker is used when built with `--features transport-nats` and a
+/// `NATS_URL` is set. Either way the rest of the program is identical.
+async fn build_transport(cfg: &Config) -> anyhow::Result<Arc<dyn Transport>> {
+    #[cfg(feature = "transport-nats")]
+    if let Some(url) = std::env::var("NATS_URL").ok().filter(|s| !s.is_empty()) {
+        tracing::info!(%url, "using NATS transport");
+        let nats = transport::nats::NatsTransport::connect(&url, cfg.app_name.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("connecting to NATS: {e}"))?;
+        return Ok(Arc::new(TracedTransport::new(nats)));
+    }
+
+    tracing::info!("using in-process transport");
+    let memory = MemoryTransport::new(cfg.bus_buffer).with_timeout(cfg.request_timeout);
+    Ok(Arc::new(TracedTransport::new(memory)))
 }
 
 /// Factor IX (disposability): shut down cleanly on Ctrl-C or SIGTERM — the signal
@@ -92,7 +190,7 @@ async fn shutdown_signal() {
     tracing::info!("shutdown signal received");
 }
 
-/// Readiness probe: report healthy only when the database answers.
+/// Readiness probe: healthy only when the database answers.
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     match state.db.ping().await {
         Ok(()) => (StatusCode::OK, "ready"),
@@ -105,38 +203,58 @@ struct CreateItem {
     name: String,
 }
 
+/// Command/reply: turn the HTTP request into an `items.create` command and return
+/// the acknowledged result.
 async fn create_item(
     State(state): State<AppState>,
     Json(body): Json<CreateItem>,
 ) -> impl IntoResponse {
-    let item = match model::insert_item(&state.db, body.name).await {
-        Ok(item) => item,
-        Err(e) => {
-            tracing::error!("insert failed: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+    let command = MessageEnvelope::command(ITEMS_CREATE, Bytes::from(body.name));
+    match state.transport.request(command).await {
+        Ok(reply) if !reply.payload.is_empty() => {
+            match serde_json::from_slice::<serde_json::Value>(&reply.payload) {
+                Ok(item) => (StatusCode::CREATED, Json(item)).into_response(),
+                Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "malformed reply").into_response(),
+            }
         }
-    };
-
-    // Publish through the traced sink.
-    let mut tx = Traced::new(state.tx.clone(), "events");
-    let event = Event {
-        id: item.id.clone(),
-        kind: "item.created".to_string(),
-        name: item.name.clone(),
-    };
-    if let Err(e) = tx.send(event).await {
-        tracing::warn!("bus publish failed: {e}");
+        Ok(_) => (StatusCode::INTERNAL_SERVER_ERROR, "command rejected").into_response(),
+        Err(e) => {
+            tracing::error!("create command failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "bus error").into_response()
+        }
     }
-
-    (StatusCode::CREATED, Json(item)).into_response()
 }
 
+/// Reads are answered in-handler; only writes go through the command bus.
 async fn list_items(State(state): State<AppState>) -> impl IntoResponse {
     match model::list_items(&state.db).await {
         Ok(items) => (StatusCode::OK, Json(items)).into_response(),
         Err(e) => {
             tracing::error!("list failed: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response()
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct Count {
+    count: i64,
+}
+
+/// Request/response over the transport: ask the responder task for the count.
+async fn count_items(State(state): State<AppState>) -> impl IntoResponse {
+    let query = MessageEnvelope::query(ITEMS_COUNT, Bytes::new());
+    match state.transport.request(query).await {
+        Ok(reply) => {
+            let count = std::str::from_utf8(&reply.payload)
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0);
+            (StatusCode::OK, Json(Count { count })).into_response()
+        }
+        Err(e) => {
+            tracing::error!("count request failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "bus error").into_response()
         }
     }
 }

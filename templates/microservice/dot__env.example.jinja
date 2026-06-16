@@ -15,5 +15,13 @@ DATABASE_URL=sqlite://data.db?mode=rwc
 # In-process message bus channel capacity.
 BUS_BUFFER=128
 
+# Hard timeout (seconds) on request/response + command/reply round-trips. Bounds
+# the correlation registry so abandoned requests cannot leak memory.
+REQUEST_TIMEOUT_SECS=5
+
+# Broker transport (only used when built with --features transport-nats). When
+# set, the service connects to NATS instead of using the in-process bus.
+# NATS_URL=nats://localhost:4222
+
 # Log filter (factor XI: logs are an event stream on stdout).
 RUST_LOG=info,[[ crate_name ]]=debug

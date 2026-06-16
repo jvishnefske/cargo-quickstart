@@ -2,6 +2,7 @@
 //! with safe local defaults so `cargo run` works out of the box.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -12,6 +13,9 @@ pub struct Config {
     pub database_url: String,
     /// Capacity of the in-process message bus channel.
     pub bus_buffer: usize,
+    /// Hard timeout on request/response and command/reply round-trips. Bounds
+    /// the correlation registry so abandoned requests cannot leak memory.
+    pub request_timeout: Duration,
 }
 
 impl Config {
@@ -34,11 +38,18 @@ impl Config {
             .map_err(|e| anyhow::anyhow!("invalid BUS_BUFFER: {e}"))?
             .unwrap_or(128);
 
+        let request_timeout_secs = var("REQUEST_TIMEOUT_SECS")
+            .map(|v| v.parse())
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("invalid REQUEST_TIMEOUT_SECS: {e}"))?
+            .unwrap_or(5);
+
         Ok(Self {
             app_name,
             bind_addr,
             database_url,
             bus_buffer,
+            request_timeout: Duration::from_secs(request_timeout_secs),
         })
     }
 }

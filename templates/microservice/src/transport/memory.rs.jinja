@@ -1,0 +1,103 @@
+//! In-process transport: an ultra-low-latency loopback that bypasses the OS
+//! network stack. Useful for tests, single-process "modular monolith" runs, and
+//! as the zero-dependency default.
+//!
+//! Pub/sub is a `tokio::broadcast` bus filtered by topic. Request/response is
+//! built on top: a correlation registry maps each in-flight request to a
+//! `oneshot`, and **every entry is bounded by a hard timeout** so orphaned
+//! requests (dropped replies, crashed peers) cannot leak memory.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use futures::StreamExt;
+use futures::stream::BoxStream;
+use tokio::sync::{Mutex, broadcast, oneshot};
+use tokio_stream::wrappers::BroadcastStream;
+
+use super::{CorrelationId, DynError, MessageEnvelope, Transport};
+
+pub struct MemoryTransport {
+    bus: broadcast::Sender<MessageEnvelope>,
+    pending: Arc<Mutex<HashMap<CorrelationId, oneshot::Sender<MessageEnvelope>>>>,
+    request_timeout: Duration,
+}
+
+impl MemoryTransport {
+    pub fn new(capacity: usize) -> Self {
+        let (bus, _) = broadcast::channel(capacity.max(1));
+        Self {
+            bus,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            request_timeout: Duration::from_secs(5),
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+}
+
+#[async_trait]
+impl Transport for MemoryTransport {
+    async fn publish(&self, envelope: MessageEnvelope) -> Result<(), DynError> {
+        // `send` errors only when there are no live subscribers, which is fine
+        // for fire-and-forget semantics.
+        let _ = self.bus.send(envelope);
+        Ok(())
+    }
+
+    async fn subscribe(
+        &self,
+        topic: &str,
+    ) -> Result<BoxStream<'static, MessageEnvelope>, DynError> {
+        let rx = self.bus.subscribe();
+        let want = topic.to_string();
+        let stream = BroadcastStream::new(rx)
+            .filter_map(|res| async move { res.ok() })
+            .filter(move |env| {
+                let matches = env.topic == want;
+                async move { matches }
+            });
+        Ok(Box::pin(stream))
+    }
+
+    async fn request(&self, mut envelope: MessageEnvelope) -> Result<MessageEnvelope, DynError> {
+        let correlation_id = envelope.correlation_id.clone().unwrap_or_default();
+        envelope.correlation_id = Some(correlation_id.clone());
+        let reply_to = format!("_reply.{}", correlation_id.0);
+        envelope.reply_to = Some(reply_to.clone());
+
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(correlation_id.clone(), tx);
+
+        // Route the first reply on `reply_to` back to the waiting caller.
+        let mut replies = self.subscribe(&reply_to).await?;
+        let pending = self.pending.clone();
+        let listen_id = correlation_id.clone();
+        tokio::spawn(async move {
+            let Some(reply) = replies.next().await else {
+                return;
+            };
+            if let Some(sender) = pending.lock().await.remove(&listen_id) {
+                let _ = sender.send(reply);
+            }
+        });
+
+        self.publish(envelope).await?;
+
+        // Bounded memory: prune the registry entry on timeout so a missing reply
+        // can never accumulate (see ARCHITECTURE.md, "correlation tracking").
+        match tokio::time::timeout(self.request_timeout, rx).await {
+            Ok(Ok(reply)) => Ok(reply),
+            Ok(Err(_)) => Err("reply channel closed before a response arrived".into()),
+            Err(_) => {
+                self.pending.lock().await.remove(&correlation_id);
+                Err(format!("request {} timed out", correlation_id.0).into())
+            }
+        }
+    }
+}

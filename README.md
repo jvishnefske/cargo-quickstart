@@ -21,7 +21,7 @@ cargo quickstart my-app -t cli  # or fully flag-driven
 | `axum`     | Async web service — `axum` + `tokio` + `tracing`         |
 | `embedded` | `no_std` Cortex-M firmware — `cortex-m-rt`, `memory.x`    |
 | `ios`      | SwiftUI iOS app + Rust core via C-ABI FFI — XCFramework, XcodeGen |
-| `microservice` | 12-factor service — `axum`, SeaORM (multi-backend), a `Stream`/`Sink` bus, Dockerfile + k8s manifests |
+| `microservice` | 12-factor service — `axum`, SeaORM (multi-backend), transport-agnostic message bus (in-process / NATS) with pub-sub + request-response + command-reply, Dockerfile + k8s manifests |
 
 Every generated project also gets, by default:
 

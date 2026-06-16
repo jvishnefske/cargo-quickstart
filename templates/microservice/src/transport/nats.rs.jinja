@@ -1,0 +1,80 @@
+//! Out-of-process broker transport (NATS). Enabled with the `transport-nats`
+//! feature.
+//!
+//! Services using this adapter open only **outbound** connections to the broker
+//! — no listening ports, so the network attack surface shrinks and there is
+//! nothing for an ingress load balancer to route. Load balancing across replicas
+//! is the broker's job: `subscribe` joins a **queue group**, so each message is
+//! delivered to exactly one healthy instance of the group.
+
+use std::collections::HashMap;
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::StreamExt;
+use futures::stream::BoxStream;
+
+use super::{DynError, MessageEnvelope, MessageType, Transport};
+
+pub struct NatsTransport {
+    client: async_nats::Client,
+    queue_group: String,
+}
+
+impl NatsTransport {
+    /// Connect to a NATS server (e.g. `nats://localhost:4222`). `queue_group` is
+    /// the load-balancing group this replica joins (usually the service name).
+    pub async fn connect(url: &str, queue_group: impl Into<String>) -> Result<Self, DynError> {
+        let client = async_nats::connect(url).await?;
+        Ok(Self {
+            client,
+            queue_group: queue_group.into(),
+        })
+    }
+}
+
+/// Decode a broker message, falling back to a raw envelope if it was not JSON
+/// (so this service interoperates with non-Rust publishers).
+fn decode(msg: async_nats::Message) -> MessageEnvelope {
+    serde_json::from_slice::<MessageEnvelope>(&msg.payload).unwrap_or_else(|_| MessageEnvelope {
+        message_id: uuid::Uuid::new_v4().to_string(),
+        correlation_id: None,
+        message_type: MessageType::Event,
+        topic: msg.subject.to_string(),
+        reply_to: msg.reply.map(|r| r.to_string()),
+        payload: msg.payload,
+        metadata: HashMap::new(),
+    })
+}
+
+#[async_trait]
+impl Transport for NatsTransport {
+    async fn publish(&self, envelope: MessageEnvelope) -> Result<(), DynError> {
+        let subject = envelope.topic.clone();
+        let bytes = Bytes::from(serde_json::to_vec(&envelope)?);
+        self.client.publish(subject, bytes).await?;
+        Ok(())
+    }
+
+    async fn subscribe(
+        &self,
+        topic: &str,
+    ) -> Result<BoxStream<'static, MessageEnvelope>, DynError> {
+        // Queue group => the broker load-balances delivery across replicas.
+        let sub = self
+            .client
+            .queue_subscribe(topic.to_string(), self.queue_group.clone())
+            .await?;
+        Ok(Box::pin(sub.map(decode)))
+    }
+
+    async fn request(&self, envelope: MessageEnvelope) -> Result<MessageEnvelope, DynError> {
+        let subject = envelope.topic.clone();
+        let bytes = Bytes::from(serde_json::to_vec(&envelope)?);
+        // async-nats provides native request/reply (inbox + correlation), so the
+        // reply is routed back to a server-assigned subject — the responder just
+        // replies to `envelope.reply_to`, exactly as with the in-memory adapter.
+        let reply = self.client.request(subject, bytes).await?;
+        Ok(decode(reply))
+    }
+}
