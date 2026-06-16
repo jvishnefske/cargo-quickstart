@@ -16,6 +16,9 @@ pub struct Config {
     /// Hard timeout on request/response and command/reply round-trips. Bounds
     /// the correlation registry so abandoned requests cannot leak memory.
     pub request_timeout: Duration,
+    /// Max concurrent in-flight HTTP requests before the service sheds load
+    /// (returns 503). Backpressure at the ingress boundary.
+    pub max_inflight: usize,
 }
 
 impl Config {
@@ -44,12 +47,19 @@ impl Config {
             .map_err(|e| anyhow::anyhow!("invalid REQUEST_TIMEOUT_SECS: {e}"))?
             .unwrap_or(5);
 
+        let max_inflight = var("MAX_INFLIGHT")
+            .map(|v| v.parse())
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("invalid MAX_INFLIGHT: {e}"))?
+            .unwrap_or(1024);
+
         Ok(Self {
             app_name,
             bind_addr,
             database_url,
             bus_buffer,
             request_timeout: Duration::from_secs(request_timeout_secs),
+            max_inflight,
         })
     }
 }

@@ -19,6 +19,9 @@ BUS_BUFFER=128
 # the correlation registry so abandoned requests cannot leak memory.
 REQUEST_TIMEOUT_SECS=5
 
+# Max concurrent in-flight HTTP requests; past this the service sheds load (503).
+MAX_INFLIGHT=1024
+
 # Broker transport (only used when built with --features transport-nats). When
 # set, the service connects to NATS instead of using the in-process bus.
 # NATS_URL=nats://localhost:4222

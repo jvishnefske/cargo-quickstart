@@ -101,3 +101,72 @@ impl Transport for MemoryTransport {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::MessageEnvelope;
+    use bytes::Bytes;
+    use futures::StreamExt;
+    use proptest::prelude::*;
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    proptest! {
+        // Async cases each spin a runtime; keep the count modest.
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        /// A subscriber receives exactly what was published to its topic.
+        #[test]
+        fn pubsub_delivers_on_topic(
+            topic in "[a-z][a-z.]{0,15}",
+            payload in proptest::collection::vec(any::<u8>(), 0..48),
+        ) {
+            runtime().block_on(async {
+                let bus = MemoryTransport::new(64);
+                let mut sub = bus.subscribe(&topic).await.unwrap();
+                bus.publish(MessageEnvelope::event(topic.clone(), Bytes::from(payload.clone())))
+                    .await
+                    .unwrap();
+                let got = tokio::time::timeout(Duration::from_secs(1), sub.next())
+                    .await
+                    .expect("delivery timed out")
+                    .expect("stream ended unexpectedly");
+                assert_eq!(got.topic, topic);
+                assert_eq!(got.payload, Bytes::from(payload));
+            });
+        }
+
+        /// `request` resolves with the responder's reply, correlated to the query.
+        #[test]
+        fn request_response_correlates(
+            req in proptest::collection::vec(any::<u8>(), 0..48),
+            rep in proptest::collection::vec(any::<u8>(), 0..48),
+        ) {
+            runtime().block_on(async {
+                let bus = Arc::new(MemoryTransport::new(64));
+                let mut requests = bus.subscribe("svc.echo").await.unwrap();
+                let responder = bus.clone();
+                let reply_payload = rep.clone();
+                tokio::spawn(async move {
+                    let Some(req_env) = requests.next().await else {
+                        return;
+                    };
+                    if let Some(reply) = req_env.reply(Bytes::from(reply_payload)) {
+                        let _ = responder.publish(reply).await;
+                    }
+                });
+                let query = MessageEnvelope::query("svc.echo", Bytes::from(req.clone()));
+                let correlation = query.correlation_id.clone();
+                let reply = bus.request(query).await.expect("request failed");
+                assert_eq!(reply.payload, Bytes::from(rep));
+                assert_eq!(reply.correlation_id, correlation);
+            });
+        }
+    }
+}

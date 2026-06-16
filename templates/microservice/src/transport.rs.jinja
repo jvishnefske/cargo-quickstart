@@ -55,7 +55,7 @@ pub enum MessageType {
 }
 
 /// The single DTO that crosses every transport boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MessageEnvelope {
     pub message_id: String,
     pub correlation_id: Option<CorrelationId>,
@@ -167,5 +167,69 @@ impl<T: Transport> Transport for TracedTransport<T> {
     async fn request(&self, envelope: MessageEnvelope) -> Result<MessageEnvelope, DynError> {
         tracing::debug!(topic = %envelope.topic, corr = ?envelope.correlation_id, "request");
         self.inner.request(envelope).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_message_type() -> impl Strategy<Value = MessageType> {
+        prop_oneof![
+            Just(MessageType::Event),
+            Just(MessageType::Query),
+            Just(MessageType::Command),
+        ]
+    }
+
+    prop_compose! {
+        fn arb_envelope()(
+            message_id in ".*",
+            correlation in proptest::option::of(".*"),
+            message_type in arb_message_type(),
+            topic in ".*",
+            reply_to in proptest::option::of(".*"),
+            payload in proptest::collection::vec(any::<u8>(), 0..64),
+            metadata in proptest::collection::hash_map(".*", ".*", 0..4),
+        ) -> MessageEnvelope {
+            MessageEnvelope {
+                message_id,
+                correlation_id: correlation.map(CorrelationId),
+                message_type,
+                topic,
+                reply_to,
+                payload: Bytes::from(payload),
+                metadata,
+            }
+        }
+    }
+
+    proptest! {
+        /// Wire-conformance: any envelope survives a JSON round-trip unchanged.
+        #[test]
+        fn envelope_json_roundtrip(env in arb_envelope()) {
+            let bytes = serde_json::to_vec(&env).unwrap();
+            let back: MessageEnvelope = serde_json::from_slice(&bytes).unwrap();
+            prop_assert_eq!(env, back);
+        }
+
+        /// A reply targets the request's `reply_to` and keeps its correlation id;
+        /// with no `reply_to`, there is no reply to build.
+        #[test]
+        fn reply_preserves_correlation(
+            env in arb_envelope(),
+            payload in proptest::collection::vec(any::<u8>(), 0..16),
+        ) {
+            let reply = env.reply(Bytes::from(payload));
+            match &env.reply_to {
+                Some(reply_to) => {
+                    let reply = reply.expect("reply_to set => a reply exists");
+                    prop_assert_eq!(&reply.topic, reply_to);
+                    prop_assert_eq!(reply.correlation_id, env.correlation_id);
+                }
+                None => prop_assert!(reply.is_none()),
+            }
+        }
     }
 }

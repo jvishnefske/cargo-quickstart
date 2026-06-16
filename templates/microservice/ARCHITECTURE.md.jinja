@@ -49,8 +49,16 @@ also emits an event), the event is consumed by a **subscribe** worker, and
 
 `TracedTransport<T>` wraps any `Transport` and emits a `tracing` event for every
 message — telemetry with zero changes to the inner transport or the domain code.
-Auth, rate-limiting, and retries follow the same decorator pattern (in a larger
-system, as Tower layers keyed off `poll_ready` for backpressure).
+Auth, rate-limiting, and retries follow the same decorator pattern.
+
+### Backpressure
+
+The HTTP ingress is fronted by a concurrency gate (`shed_when_overloaded` in
+`main.rs`): each request holds a semaphore permit for its lifetime, and once
+`MAX_INFLIGHT` permits are taken the service **sheds load with `503`** instead of
+queueing work it cannot process. This is the same readiness gate a Tower
+`load_shed` + `concurrency_limit` stack provides via `poll_ready`, propagated to
+the ingress boundary.
 
 ## Adapters
 
@@ -95,6 +103,21 @@ per-backend from the entity. Cargo features (`backend-postgres`, `backend-mysql`
 | IX Disposability | graceful shutdown on SIGTERM |
 | XI Logs | `tracing` to stdout; `TracedTransport` spans |
 | XII Admin processes | schema bootstrap at startup |
+
+## Testing
+
+Beyond example-based tests, the transport layer is covered by **property-based
+tests** (`proptest`):
+
+- every `MessageEnvelope` survives a JSON round-trip unchanged (wire-conformance);
+- a reply always targets the request's `reply_to` and preserves its correlation id;
+- the in-memory bus delivers published messages to topic subscribers;
+- `request` always resolves with the responder's reply, correctly correlated.
+
+```sh
+cargo test                       # unit + property tests
+cargo test --all-features        # also compiles the NATS adapter
+```
 
 ## Run it
 

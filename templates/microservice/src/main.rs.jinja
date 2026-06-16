@@ -14,12 +14,16 @@ mod config;
 mod model;
 mod transport;
 
+use axum::extract::Request;
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use bytes::Bytes;
 use futures::StreamExt;
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 use config::Config;
 use transport::memory::MemoryTransport;
@@ -59,12 +63,19 @@ async fn main() -> anyhow::Result<()> {
         db,
         transport: transport.clone(),
     };
+    // Factor VIII / backpressure: cap concurrent in-flight requests and shed load
+    // (503) past the limit, so the service never accepts work it can't process.
+    let inflight = Arc::new(Semaphore::new(cfg.max_inflight));
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
         .route("/items", get(list_items).post(create_item))
         .route("/items/count", get(count_items))
-        .with_state(state);
+        .with_state(state)
+        .layer(middleware::from_fn_with_state(
+            inflight,
+            shed_when_overloaded,
+        ));
 
     let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
     tracing::info!("listening on http://{}", listener.local_addr()?);
@@ -188,6 +199,21 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
     tracing::info!("shutdown signal received");
+}
+
+/// Ingress backpressure: hold a permit for each request's lifetime; if none is
+/// free the service is at capacity, so shed the load with 503 rather than
+/// queueing work it cannot process. A Tower `load_shed` + `concurrency_limit`
+/// stack expresses the same readiness gate via `poll_ready`.
+async fn shed_when_overloaded(
+    State(limit): State<Arc<Semaphore>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    match Arc::clone(&limit).try_acquire_owned() {
+        Ok(_permit) => next.run(request).await,
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "overloaded").into_response(),
+    }
 }
 
 /// Readiness probe: healthy only when the database answers.
