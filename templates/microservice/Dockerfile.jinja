@@ -1,0 +1,16 @@
+# Multi-stage build (factor V: strict build/release/run separation).
+# Result: a small, non-root image on distroless.
+FROM rust:1-bookworm AS build
+WORKDIR /app
+COPY Cargo.toml ./
+COPY src ./src
+RUN cargo build --release
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=build /app/target/release/[[ crate_name ]] /usr/local/bin/app
+# Factor VII: bind the port the platform assigns (defaults for local runs).
+ENV HOST=0.0.0.0 \
+    PORT=8080
+EXPOSE 8080
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/app"]

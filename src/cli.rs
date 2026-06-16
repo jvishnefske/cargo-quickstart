@@ -72,6 +72,8 @@ pub enum Template {
     Embedded,
     /// SwiftUI iOS app backed by a Rust core (C-ABI FFI).
     Ios,
+    /// 12-factor microservice: axum, SeaORM, a Stream/Sink message bus, k8s.
+    Microservice,
 }
 
 impl Template {
@@ -83,6 +85,7 @@ impl Template {
             Template::Axum => "axum",
             Template::Embedded => "embedded",
             Template::Ios => "ios",
+            Template::Microservice => "microservice",
         }
     }
 
@@ -94,16 +97,18 @@ impl Template {
             Template::Axum => "Async web service (axum, tokio)",
             Template::Embedded => "Embedded firmware (no_std, Cortex-M)",
             Template::Ios => "iOS app (SwiftUI front end, Rust core)",
+            Template::Microservice => "12-factor microservice (axum, SeaORM, pub/sub, k8s)",
         }
     }
 
-    pub const ALL: [Template; 6] = [
+    pub const ALL: [Template; 7] = [
         Template::Cli,
         Template::Lib,
         Template::Wasm,
         Template::Axum,
         Template::Embedded,
         Template::Ios,
+        Template::Microservice,
     ];
 }
 

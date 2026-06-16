@@ -1,0 +1,142 @@
+//! [[ description ]]
+//!
+//! A 12-factor microservice: configuration from the environment, structured logs
+//! to stdout, a Stream/Sink message bus, SeaORM persistence, Kubernetes health
+//! and readiness probes, and graceful shutdown on SIGTERM.
+
+mod config;
+mod messaging;
+mod model;
+
+use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use futures::{SinkExt, StreamExt};
+use sea_orm::DatabaseConnection;
+use serde::Deserialize;
+
+use config::Config;
+use messaging::{Event, Traced};
+
+#[derive(Clone)]
+struct AppState {
+    db: DatabaseConnection,
+    /// Publish half of the bus. Cloning a `Sender` is how futures' mpsc supports
+    /// multiple producers.
+    tx: futures::channel::mpsc::Sender<Event>,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Factor XI: logs are an event stream on stdout; RUST_LOG controls the level.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+
+    let cfg = Config::from_env()?;
+    tracing::info!(app = %cfg.app_name, addr = %cfg.bind_addr, "starting");
+
+    let db = model::connect(&cfg.database_url).await?;
+
+    // The bus: a Sink to publish, a Stream to consume. Swap the channel for
+    // NATS/Kafka/Redis by supplying any Stream/Sink — call sites don't change.
+    let (tx, rx) = messaging::channel(cfg.bus_buffer);
+
+    // Subscriber task. `Traced` instruments every message; StreamExt combinators
+    // (`filter`, `for_each`) express the processing pipeline.
+    tokio::spawn(async move {
+        Traced::new(rx, "events")
+            .filter(|ev| futures::future::ready(!ev.name.is_empty()))
+            .for_each(|ev| async move {
+                tracing::info!(id = %ev.id, kind = %ev.kind, name = %ev.name, "event handled");
+            })
+            .await;
+    });
+
+    let state = AppState { db, tx };
+    let app = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/readyz", get(readyz))
+        .route("/items", get(list_items).post(create_item))
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(cfg.bind_addr).await?;
+    tracing::info!("listening on http://{}", listener.local_addr()?);
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    Ok(())
+}
+
+/// Factor IX (disposability): shut down cleanly on Ctrl-C or SIGTERM — the signal
+/// Kubernetes sends before terminating a pod.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut sig) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            sig.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("shutdown signal received");
+}
+
+/// Readiness probe: report healthy only when the database answers.
+async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    match state.db.ping().await {
+        Ok(()) => (StatusCode::OK, "ready"),
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "not ready"),
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateItem {
+    name: String,
+}
+
+async fn create_item(
+    State(state): State<AppState>,
+    Json(body): Json<CreateItem>,
+) -> impl IntoResponse {
+    let item = match model::insert_item(&state.db, body.name).await {
+        Ok(item) => item,
+        Err(e) => {
+            tracing::error!("insert failed: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
+        }
+    };
+
+    // Publish through the traced sink.
+    let mut tx = Traced::new(state.tx.clone(), "events");
+    let event = Event {
+        id: item.id.clone(),
+        kind: "item.created".to_string(),
+        name: item.name.clone(),
+    };
+    if let Err(e) = tx.send(event).await {
+        tracing::warn!("bus publish failed: {e}");
+    }
+
+    (StatusCode::CREATED, Json(item)).into_response()
+}
+
+async fn list_items(State(state): State<AppState>) -> impl IntoResponse {
+    match model::list_items(&state.db).await {
+        Ok(items) => (StatusCode::OK, Json(items)).into_response(),
+        Err(e) => {
+            tracing::error!("list failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response()
+        }
+    }
+}

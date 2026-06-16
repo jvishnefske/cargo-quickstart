@@ -1,0 +1,19 @@
+# 12-factor configuration (factor III). Copy to `.env` for local development.
+# In production these are injected by the platform (e.g. a Kubernetes ConfigMap
+# and Secret) — never shipped as a file in the image.
+
+APP_NAME=[[ crate_name ]]
+HOST=0.0.0.0
+PORT=8080
+
+# Attached backing service (factor IV). SeaORM picks the driver from the scheme:
+#   sqlite://data.db?mode=rwc
+#   postgres://user:password@localhost:5432/[[ crate_name ]]
+#   mysql://user:password@localhost:3306/[[ crate_name ]]
+DATABASE_URL=sqlite://data.db?mode=rwc
+
+# In-process message bus channel capacity.
+BUS_BUFFER=128
+
+# Log filter (factor XI: logs are an event stream on stdout).
+RUST_LOG=info,[[ crate_name ]]=debug

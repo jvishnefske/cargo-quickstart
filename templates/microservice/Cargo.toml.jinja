@@ -1,0 +1,40 @@
+[package]
+name = "[[ crate_name ]]"
+version = "0.1.0"
+edition = "[[ edition ]]"
+description = "[[ description ]]"
+authors = ["[[ author_name ]] <[[ author_email ]]>"]
+[%- if has_license %]
+license = "[[ license ]]"
+[%- endif %]
+
+[features]
+# Database backends. SeaORM selects one at runtime from DATABASE_URL's scheme;
+# these gate which drivers are compiled in. Build with --no-default-features
+# --features backend-mysql (etc.) to slim the binary to a single backend.
+default = ["backend-postgres", "backend-sqlite"]
+backend-postgres = ["sea-orm/sqlx-postgres"]
+backend-mysql = ["sea-orm/sqlx-mysql"]
+backend-sqlite = ["sea-orm/sqlx-sqlite"]
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+futures = "0.3"
+pin-project-lite = "0.2"
+sea-orm = { version = "1", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "macros",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

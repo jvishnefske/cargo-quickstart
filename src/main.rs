@@ -81,6 +81,7 @@ fn print_summary(cfg: &ProjectConfig, dest: &std::path::Path, files: usize) {
         Template::Wasm => "trunk serve",
         Template::Embedded => "cargo build --release",
         Template::Axum => "cargo run",
+        Template::Microservice => "cp .env.example .env && cargo run",
         Template::Ios => "cargo test && bash build-rust.sh && xcodegen generate",
         _ => "cargo run",
     };

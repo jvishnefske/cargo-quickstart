@@ -21,6 +21,7 @@ cargo quickstart my-app -t cli  # or fully flag-driven
 | `axum`     | Async web service — `axum` + `tokio` + `tracing`         |
 | `embedded` | `no_std` Cortex-M firmware — `cortex-m-rt`, `memory.x`    |
 | `ios`      | SwiftUI iOS app + Rust core via C-ABI FFI — XCFramework, XcodeGen |
+| `microservice` | 12-factor service — `axum`, SeaORM (multi-backend), a `Stream`/`Sink` bus, Dockerfile + k8s manifests |
 
 Every generated project also gets, by default:
 
@@ -39,7 +40,7 @@ Arguments:
   [NAME]                 Project name (also the directory created)
 
 Options:
-  -t, --template <KIND>  cli | lib | wasm | axum | embedded | ios
+  -t, --template <KIND>  cli | lib | wasm | axum | embedded | ios | microservice
       --description <S>   One-line description
       --license <L>      dual | mit | apache | none   (default: dual)
       --edition <E>      2021 | 2024                  (default: 2024)

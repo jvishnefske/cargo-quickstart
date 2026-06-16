@@ -12,7 +12,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Every selectable template slug. Keep in sync with `cli::Template::ALL`.
-const SLUGS: &[&str] = &["cli", "lib", "wasm", "axum", "embedded", "ios"];
+const SLUGS: &[&str] = &[
+    "cli",
+    "lib",
+    "wasm",
+    "axum",
+    "embedded",
+    "ios",
+    "microservice",
+];
 
 /// Files the shared layer gives every project, regardless of template.
 const SHARED_FILES: &[&str] = &[
@@ -83,7 +91,37 @@ fn every_template_scaffolds_a_clean_project() {
                 );
             }
         }
+
+        // Generated Rust must already be rustfmt-clean: the generated CI runs
+        // `cargo fmt --check`, so any drift here breaks a fresh project's first
+        // build. rustfmt is hermetic (no network), so we can check it cheaply.
+        let edition = edition_of(&cargo);
+        for (path, _) in &files {
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let out = Command::new("rustfmt")
+                .args(["--edition", &edition, "--check"])
+                .arg(path)
+                .output()
+                .expect("failed to spawn rustfmt");
+            assert!(
+                out.status.success(),
+                "{slug}: rustfmt (edition {edition}) would reformat {}:\n{}",
+                path.strip_prefix(tmp.path()).unwrap().display(),
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
     }
+}
+
+/// Read the `edition = "…"` value from a generated Cargo.toml.
+fn edition_of(cargo_toml: &str) -> String {
+    cargo_toml
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("edition = "))
+        .map(|v| v.trim().trim_matches('"').to_string())
+        .unwrap_or_else(|| "2021".to_string())
 }
 
 #[test]

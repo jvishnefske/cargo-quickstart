@@ -1,0 +1,63 @@
+//! Persistence via SeaORM — an ORM with multiple backends. The same code targets
+//! PostgreSQL, MySQL, or SQLite: SeaORM chooses the driver from the DATABASE_URL
+//! scheme at runtime, and the schema below is generated per-backend from the
+//! entity definition (no hand-written, dialect-specific DDL).
+
+use sea_orm::entity::prelude::*;
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Schema, Set};
+
+/// The `items` table.
+pub mod item {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, serde::Serialize)]
+    #[sea_orm(table_name = "items")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: String,
+        pub name: String,
+        /// Unix epoch seconds — portable across every backend.
+        pub created_at: i64,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// Connect to the database and ensure the schema exists. The schema bootstrap is
+/// an idempotent admin step run at startup (factor XII).
+pub async fn connect(database_url: &str) -> anyhow::Result<DatabaseConnection> {
+    let mut opts = ConnectOptions::new(database_url.to_owned());
+    opts.sqlx_logging(false);
+    let db = Database::connect(opts).await?;
+    ensure_schema(&db).await?;
+    Ok(db)
+}
+
+async fn ensure_schema(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let backend = db.get_database_backend();
+    let schema = Schema::new(backend);
+    let mut stmt = schema.create_table_from_entity(item::Entity);
+    stmt.if_not_exists();
+    db.execute(backend.build(&stmt)).await?;
+    Ok(())
+}
+
+pub async fn insert_item(db: &DatabaseConnection, name: String) -> anyhow::Result<item::Model> {
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let model = item::ActiveModel {
+        id: Set(uuid::Uuid::new_v4().to_string()),
+        name: Set(name),
+        created_at: Set(created_at),
+    };
+    Ok(model.insert(db).await?)
+}
+
+pub async fn list_items(db: &DatabaseConnection) -> anyhow::Result<Vec<item::Model>> {
+    Ok(item::Entity::find().all(db).await?)
+}

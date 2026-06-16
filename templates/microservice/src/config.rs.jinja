@@ -1,0 +1,48 @@
+//! 12-factor configuration (factor III): everything comes from the environment,
+//! with safe local defaults so `cargo run` works out of the box.
+
+use std::net::SocketAddr;
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub app_name: String,
+    pub bind_addr: SocketAddr,
+    /// Attached backing service (factor IV). SeaORM picks the driver from the
+    /// URL scheme: `postgres://`, `mysql://`, or `sqlite://`.
+    pub database_url: String,
+    /// Capacity of the in-process message bus channel.
+    pub bus_buffer: usize,
+}
+
+impl Config {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let app_name = var("APP_NAME").unwrap_or_else(|| "[[ crate_name ]]".to_string());
+
+        // Factor VII (port binding): honour PORT, with an optional HOST.
+        let host = var("HOST").unwrap_or_else(|| "0.0.0.0".to_string());
+        let port = var("PORT").unwrap_or_else(|| "8080".to_string());
+        let bind_addr = format!("{host}:{port}")
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid HOST/PORT '{host}:{port}': {e}"))?;
+
+        let database_url =
+            var("DATABASE_URL").unwrap_or_else(|| "sqlite://data.db?mode=rwc".to_string());
+
+        let bus_buffer = var("BUS_BUFFER")
+            .map(|v| v.parse())
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("invalid BUS_BUFFER: {e}"))?
+            .unwrap_or(128);
+
+        Ok(Self {
+            app_name,
+            bind_addr,
+            database_url,
+            bus_buffer,
+        })
+    }
+}
+
+fn var(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty())
+}

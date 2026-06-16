@@ -1,0 +1,94 @@
+# [[ project_name ]] — architecture
+
+A 12-factor microservice in Rust: **axum** HTTP, a **`Stream`/`Sink` message
+bus**, **SeaORM** persistence over multiple backends, and **Kubernetes**
+manifests with health/readiness probes and autoscaling.
+
+## Layout
+
+```
+src/
+  main.rs        HTTP routes, wiring, graceful shutdown
+  config.rs      all configuration, read from the environment
+  messaging.rs   the Stream/Sink bus + `Traced` tracing middleware
+  model.rs       SeaORM entity + connect/insert/list
+k8s/             ConfigMap, Secret, Deployment, Service, HPA, kustomization
+Dockerfile       multi-stage build → distroless non-root image
+.env.example     local configuration template
+```
+
+## Messaging — `Stream` / `Sink`
+
+The bus is defined purely in terms of `futures::Stream` (receive) and
+`futures::Sink` (send), so the transport is pluggable:
+
+- **Publish** is `SinkExt::send` on a `Sink<Event>`.
+- **Subscribe** is consuming a `Stream<Item = Event>` with `StreamExt`
+  combinators (`filter`, `map`, `for_each`, `buffered`, …).
+- **`Traced<S>`** is middleware: it wraps any inner stream or sink and emits a
+  `tracing` event for every message, without the producer or consumer knowing.
+
+The default transport is an in-process `futures::channel::mpsc`. To move to a
+real broker (NATS, Kafka, Redis Streams), provide a type that implements
+`Stream`/`Sink` for that broker — **no call site changes**, and `Traced` keeps
+instrumenting it.
+
+```rust
+// publish
+let mut tx = Traced::new(state.tx.clone(), "events");
+tx.send(Event { /* … */ }).await?;
+
+// subscribe
+Traced::new(rx, "events")
+    .filter(|ev| futures::future::ready(!ev.name.is_empty()))
+    .for_each(|ev| async move { /* handle */ })
+    .await;
+```
+
+## Persistence — SeaORM, multiple backends
+
+`model.rs` defines a SeaORM entity once. The backend is chosen at **runtime**
+from the `DATABASE_URL` scheme (`postgres://`, `mysql://`, `sqlite://`), and the
+table is created from the entity with backend-appropriate DDL. Cargo features
+(`backend-postgres`, `backend-mysql`, `backend-sqlite`) control which drivers are
+compiled in; the default build includes Postgres and SQLite.
+
+## Endpoints
+
+| Route | Purpose |
+|---|---|
+| `GET /healthz` | Liveness — process is up. |
+| `GET /readyz` | Readiness — returns 503 until the database answers a ping. |
+| `POST /items` | `{"name": "…"}` → inserts a row and publishes an `item.created` event. |
+| `GET /items` | Lists stored items. |
+
+## 12-factor mapping
+
+| Factor | Where |
+|---|---|
+| III Config | `config.rs` — everything from env vars |
+| IV Backing services | DB via `DATABASE_URL`; bus is swappable |
+| V Build/release/run | multi-stage `Dockerfile` |
+| VI Processes | stateless; all state in the DB / bus |
+| VII Port binding | binds `PORT` (default 8080) |
+| VIII Concurrency | tokio tasks; scale via replicas / HPA |
+| IX Disposability | graceful shutdown on SIGTERM |
+| XI Logs | `tracing` to stdout |
+| XII Admin processes | schema bootstrap at startup |
+
+## Run it
+
+```sh
+cp .env.example .env
+cargo run
+
+curl -sXPOST localhost:8080/items -H 'content-type: application/json' -d '{"name":"hello"}'
+curl -s localhost:8080/items
+```
+
+## Deploy
+
+```sh
+docker build -t [[ project_name ]]:latest .
+kubectl apply -k k8s/      # edit k8s/secret.yaml first (use a real DATABASE_URL)
+```

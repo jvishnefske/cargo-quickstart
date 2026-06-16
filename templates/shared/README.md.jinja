@@ -15,6 +15,13 @@ cargo build --release  # cross-compiles for thumbv7em-none-eabihf
 # flash/run with your probe, e.g. `cargo run` once you set a runner in .cargo/config.toml
 [%- elif kind == "axum" -%]
 cargo run              # serves on http://localhost:3000
+[%- elif kind == "microservice" -%]
+cp .env.example .env   # local config (defaults to a sqlite file)
+cargo run              # serves on http://localhost:8080
+# create then list an item:
+#   curl -sXPOST localhost:8080/items -H 'content-type: application/json' -d '{"name":"hello"}'
+#   curl -s localhost:8080/items
+# Architecture, 12-factor mapping, and k8s deploy: see ARCHITECTURE.md
 [%- elif kind == "ios" -%]
 cargo test             # build & test the Rust core (CI-verified)
 bash build-rust.sh     # cross-compile the core into ios/Frameworks/RustCore.xcframework
