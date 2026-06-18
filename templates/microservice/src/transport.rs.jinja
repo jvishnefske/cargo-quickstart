@@ -148,6 +148,14 @@ impl<T> TracedTransport<T> {
 #[async_trait]
 impl<T: Transport> Transport for TracedTransport<T> {
     async fn publish(&self, envelope: MessageEnvelope) -> Result<(), DynError> {
+        // Stamp the current trace context into the envelope so the receiver can
+        // continue the same trace, regardless of the underlying transport.
+        #[cfg(feature = "otel")]
+        let envelope = {
+            let mut envelope = envelope;
+            crate::telemetry::inject(&mut envelope.metadata);
+            envelope
+        };
         tracing::debug!(topic = %envelope.topic, kind = ?envelope.message_type, "publish");
         self.inner.publish(envelope).await
     }
@@ -165,6 +173,12 @@ impl<T: Transport> Transport for TracedTransport<T> {
     }
 
     async fn request(&self, envelope: MessageEnvelope) -> Result<MessageEnvelope, DynError> {
+        #[cfg(feature = "otel")]
+        let envelope = {
+            let mut envelope = envelope;
+            crate::telemetry::inject(&mut envelope.metadata);
+            envelope
+        };
         tracing::debug!(topic = %envelope.topic, corr = ?envelope.correlation_id, "request");
         self.inner.request(envelope).await
     }

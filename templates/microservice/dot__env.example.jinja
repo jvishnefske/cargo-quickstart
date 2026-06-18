@@ -28,3 +28,9 @@ MAX_INFLIGHT=1024
 
 # Log filter (factor XI: logs are an event stream on stdout).
 RUST_LOG=info,[[ crate_name ]]=debug
+
+# Distributed tracing. Build with `--features otel` to export OpenTelemetry spans
+# and propagate W3C trace context through the message-envelope metadata. Spans
+# print to stdout by default; in production run a collector and swap the stdout
+# exporter for opentelemetry-otlp (see src/telemetry.rs), pointing it here:
+# OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317

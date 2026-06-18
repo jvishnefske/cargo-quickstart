@@ -18,6 +18,15 @@ backend-sqlite = ["sea-orm/sqlx-sqlite"]
 # Out-of-process broker transport. Off by default so the service builds and runs
 # on the in-memory transport with no external dependencies.
 transport-nats = ["dep:async-nats"]
+# Distributed tracing. Exports OTel spans to stdout by default (swap the exporter
+# for opentelemetry-otlp in production) and propagates W3C trace context through
+# the message-envelope metadata, so a request is traceable across every hop.
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-stdout",
+    "dep:tracing-opentelemetry",
+]
 
 [dependencies]
 axum = "0.7"
@@ -43,6 +52,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
 async-nats = { version = "0.38", optional = true }
+# Distributed tracing (feature `otel`). The batch span processor runs on its own
+# thread, so no async-runtime feature is required here.
+opentelemetry = { version = "0.32", optional = true }
+opentelemetry_sdk = { version = "0.32", optional = true }
+opentelemetry-stdout = { version = "0.32", optional = true }
+tracing-opentelemetry = { version = "0.33", optional = true }
 
 [dev-dependencies]
 proptest = "1"

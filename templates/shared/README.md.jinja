@@ -21,6 +21,7 @@ cargo run              # serves on http://localhost:8080
 # create then list an item:
 #   curl -sXPOST localhost:8080/items -H 'content-type: application/json' -d '{"name":"hello"}'
 #   curl -s localhost:8080/items
+# Nix: `nix develop` (dev shell) / `nix build` (release binary) — see flake.nix
 # Architecture, 12-factor mapping, and k8s deploy: see ARCHITECTURE.md
 [%- elif kind == "ios" -%]
 cargo test             # build & test the Rust core (CI-verified)

@@ -1,0 +1,59 @@
+//! OpenTelemetry trace propagation (feature `otel`).
+//!
+//! The doc's "unified telemetry via the envelope metadata": W3C trace context
+//! rides in the [`crate::transport::MessageEnvelope`] metadata, so a request can
+//! be followed end-to-end across every transport hop — whether it was delivered
+//! in-process or through a broker — not just within one process.
+//!
+//! Spans are exported to **stdout** by default, so the feature is demonstrable
+//! with no collector running (spans print as JSON). For production, swap the
+//! stdout exporter for `opentelemetry-otlp` and point it at a collector with
+//! `OTEL_EXPORTER_OTLP_ENDPOINT`; nothing else in this module changes.
+
+use std::collections::HashMap;
+
+use opentelemetry::global;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_sdk::propagation::TraceContextPropagator;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use tracing_subscriber::Layer;
+use tracing_subscriber::registry::LookupSpan;
+
+/// Build the OpenTelemetry tracing layer and install the global W3C propagator.
+///
+/// Spans flow through a batch processor (its own background thread — no Tokio
+/// runtime coupling) to the stdout exporter. Compose the returned layer into the
+/// subscriber so every `tracing` span also becomes an OTel span.
+pub fn tracer_layer<S>() -> impl Layer<S>
+where
+    S: tracing::Subscriber + for<'span> LookupSpan<'span>,
+{
+    // Carry trace context across boundaries as a W3C `traceparent`.
+    global::set_text_map_propagator(TraceContextPropagator::new());
+
+    let exporter = opentelemetry_stdout::SpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .build();
+    let tracer = provider.tracer("[[ crate_name ]]");
+
+    // Keep the provider alive for the process lifetime so batched spans flush.
+    global::set_tracer_provider(provider);
+
+    tracing_opentelemetry::layer().with_tracer(tracer)
+}
+
+/// Inject the current span's trace context into outgoing message metadata, so the
+/// receiver can continue the originating trace.
+pub fn inject(metadata: &mut HashMap<String, String>) {
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    let cx = tracing::Span::current().context();
+    global::get_text_map_propagator(|propagator| propagator.inject_context(&cx, metadata));
+}
+
+/// Extract a trace context from received message metadata. Returns the root
+/// context when no `traceparent` header is present.
+pub fn extract(metadata: &HashMap<String, String>) -> opentelemetry::Context {
+    global::get_text_map_propagator(|propagator| propagator.extract(metadata))
+}

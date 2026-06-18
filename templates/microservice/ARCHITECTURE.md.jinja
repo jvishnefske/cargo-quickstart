@@ -51,6 +51,17 @@ also emits an event), the event is consumed by a **subscribe** worker, and
 message — telemetry with zero changes to the inner transport or the domain code.
 Auth, rate-limiting, and retries follow the same decorator pattern.
 
+**Distributed tracing (`--features otel`).** The same layer is the injection point
+for OpenTelemetry: `publish`/`request` stamp the current span's **W3C trace
+context** into the envelope `metadata`, and each worker extracts it and continues
+the originating trace (`span.set_parent`). Because the context rides in the
+envelope, a request is traceable end-to-end across every hop — whether it was
+delivered in-process or through a broker. Spans are exported to **stdout** by
+default (visible with no collector running); for production, swap the stdout
+exporter for `opentelemetry-otlp` in `src/telemetry.rs` and point it at a
+collector with `OTEL_EXPORTER_OTLP_ENDPOINT`. Without the feature there is no
+OTel dependency and `tracing` logs to stdout as before.
+
 ### Backpressure
 
 The HTTP ingress is fronted by a concurrency gate (`shed_when_overloaded` in
@@ -101,7 +112,7 @@ per-backend from the entity. Cargo features (`backend-postgres`, `backend-mysql`
 | VII Port binding | binds `PORT` (HTTP ingress) |
 | VIII Concurrency | tokio tasks; scale via replicas / HPA / queue groups |
 | IX Disposability | graceful shutdown on SIGTERM |
-| XI Logs | `tracing` to stdout; `TracedTransport` spans |
+| XI Logs | `tracing` to stdout; `TracedTransport` spans; OTel export + W3C propagation via `--features otel` |
 | XII Admin processes | schema bootstrap at startup |
 
 ## Testing
@@ -141,4 +152,12 @@ cargo run --features transport-nats     # with NATS_URL=nats://localhost:4222 se
 ```sh
 docker build -t [[ project_name ]]:latest .
 kubectl apply -k k8s/      # edit k8s/secret.yaml first (real DATABASE_URL)
+```
+
+With Nix (see `flake.nix`):
+
+```sh
+nix develop        # dev shell: cargo, rustc, clippy, rustfmt, sqlite
+cargo generate-lockfile && nix build   # release binary → ./result/bin
+nix build .#image && docker load < result   # (Linux) OCI image
 ```

@@ -12,6 +12,8 @@
 
 mod config;
 mod model;
+#[cfg(feature = "otel")]
+mod telemetry;
 mod transport;
 
 use axum::extract::Request;
@@ -24,6 +26,7 @@ use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use tracing::Instrument;
 
 use config::Config;
 use transport::memory::MemoryTransport;
@@ -45,11 +48,22 @@ struct AppState {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Factor XI: logs are an event stream on stdout; RUST_LOG controls the level.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    // With `--features otel`, also export OpenTelemetry spans (stdout by default)
+    // and propagate W3C trace context through the message-envelope metadata.
+    #[cfg(feature = "otel")]
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(telemetry::tracer_layer())
+            .init();
+    }
+    #[cfg(not(feature = "otel"))]
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let cfg = Config::from_env()?;
     tracing::info!(app = %cfg.app_name, addr = %cfg.bind_addr, "starting");
@@ -100,27 +114,39 @@ async fn spawn_workers(
             .map_err(|e| anyhow::anyhow!("subscribe {ITEMS_CREATE}: {e}"))?;
         tokio::spawn(async move {
             while let Some(cmd) = commands.next().await {
-                let name = String::from_utf8_lossy(&cmd.payload).into_owned();
-                match model::insert_item(&db, name).await {
-                    Ok(item) => {
-                        let body = Bytes::from(serde_json::to_vec(&item).unwrap_or_default());
-                        // Notify subscribers (decoupled), then ACK the command.
-                        let _ = transport
-                            .publish(MessageEnvelope::event(ITEMS_EVENTS, body.clone()))
-                            .await;
-                        if let Some(reply) = cmd.reply(body) {
-                            let _ = transport.publish(reply).await;
+                // A span per message; under `otel` it continues the originating
+                // trace carried in the envelope metadata.
+                let span = tracing::info_span!("handle", topic = ITEMS_CREATE);
+                #[cfg(feature = "otel")]
+                {
+                    use tracing_opentelemetry::OpenTelemetrySpanExt;
+                    let _ = span.set_parent(telemetry::extract(&cmd.metadata));
+                }
+                async {
+                    let name = String::from_utf8_lossy(&cmd.payload).into_owned();
+                    match model::insert_item(&db, name).await {
+                        Ok(item) => {
+                            let body = Bytes::from(serde_json::to_vec(&item).unwrap_or_default());
+                            // Notify subscribers (decoupled), then ACK the command.
+                            let _ = transport
+                                .publish(MessageEnvelope::event(ITEMS_EVENTS, body.clone()))
+                                .await;
+                            if let Some(reply) = cmd.reply(body) {
+                                let _ = transport.publish(reply).await;
+                            }
                         }
-                    }
-                    Err(e) => {
-                        tracing::error!("command {ITEMS_CREATE} failed: {e}");
-                        // NACK: empty reply. A production system would route to a
-                        // dead-letter queue and return a typed error envelope.
-                        if let Some(reply) = cmd.reply(Bytes::new()) {
-                            let _ = transport.publish(reply).await;
+                        Err(e) => {
+                            tracing::error!("command {ITEMS_CREATE} failed: {e}");
+                            // NACK: empty reply. A production system would route to a
+                            // dead-letter queue and return a typed error envelope.
+                            if let Some(reply) = cmd.reply(Bytes::new()) {
+                                let _ = transport.publish(reply).await;
+                            }
                         }
                     }
                 }
+                .instrument(span)
+                .await;
             }
         });
     }
@@ -133,6 +159,13 @@ async fn spawn_workers(
             .map_err(|e| anyhow::anyhow!("subscribe {ITEMS_EVENTS}: {e}"))?;
         tokio::spawn(async move {
             while let Some(ev) = events.next().await {
+                let span = tracing::info_span!("handle", topic = ITEMS_EVENTS);
+                #[cfg(feature = "otel")]
+                {
+                    use tracing_opentelemetry::OpenTelemetrySpanExt;
+                    let _ = span.set_parent(telemetry::extract(&ev.metadata));
+                }
+                let _enter = span.enter();
                 tracing::info!(id = %ev.message_id, "event handled");
             }
         });
@@ -148,10 +181,20 @@ async fn spawn_workers(
             .map_err(|e| anyhow::anyhow!("subscribe {ITEMS_COUNT}: {e}"))?;
         tokio::spawn(async move {
             while let Some(req) = queries.next().await {
-                let count = model::count_items(&db).await.unwrap_or(0);
-                if let Some(reply) = req.reply(Bytes::from(count.to_string())) {
-                    let _ = transport.publish(reply).await;
+                let span = tracing::info_span!("handle", topic = ITEMS_COUNT);
+                #[cfg(feature = "otel")]
+                {
+                    use tracing_opentelemetry::OpenTelemetrySpanExt;
+                    let _ = span.set_parent(telemetry::extract(&req.metadata));
                 }
+                async {
+                    let count = model::count_items(&db).await.unwrap_or(0);
+                    if let Some(reply) = req.reply(Bytes::from(count.to_string())) {
+                        let _ = transport.publish(reply).await;
+                    }
+                }
+                .instrument(span)
+                .await;
             }
         });
     }

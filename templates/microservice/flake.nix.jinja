@@ -1,0 +1,74 @@
+# Nix build & dev shell for [[ project_name ]].
+#
+# This generated project has no Cargo.lock until its first build. Before
+# `nix build`, create one with `cargo generate-lockfile` (or `cargo build`) and
+# commit it — the build reads dependency hashes from ./Cargo.lock, so there is
+# no cargoHash to maintain.
+#
+#   nix develop        # dev shell: cargo, rustc, clippy, rustfmt, sqlite, …
+#   nix build          # release binary → ./result/bin/[[ crate_name ]]
+#   nix build .#image  # (Linux) OCI image: nix build .#image && docker load < result
+{
+  description = "[[ description ]]";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+  };
+
+  outputs = { self, nixpkgs }:
+    let
+      systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);
+
+      # Build from the committed Cargo.lock — no cargoHash to maintain.
+      mkPackage = pkgs: pkgs.rustPlatform.buildRustPackage {
+        pname = "[[ crate_name ]]";
+        version = "0.1.0";
+        src = pkgs.lib.cleanSource ./.;
+        cargoLock.lockFile = ./Cargo.lock;
+        # rustls/ring → no OpenSSL needed. pkg-config + sqlite cover sqlx-sqlite
+        # when it links a system libsqlite3 (harmless when the driver bundles it).
+        nativeBuildInputs = [ pkgs.pkg-config ];
+        buildInputs = [ pkgs.sqlite ];
+        meta = {
+          description = "[[ description ]]";
+          mainProgram = "[[ crate_name ]]";
+        };
+      };
+    in
+    {
+      packages = forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          default = mkPackage pkgs;
+        }
+        // nixpkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          # Minimal layered OCI image wrapping the release binary.
+          image = pkgs.dockerTools.buildLayeredImage {
+            name = "[[ crate_name ]]";
+            tag = "latest";
+            contents = [ pkgs.dockerTools.caCertificates ];
+            config = {
+              Entrypoint = [ "${mkPackage pkgs}/bin/[[ crate_name ]]" ];
+              Env = [ "HOST=0.0.0.0" "PORT=8080" ];
+              ExposedPorts = { "8080/tcp" = { }; };
+              User = "65534:65534";
+            };
+          };
+        });
+
+      devShells = forAllSystems (system:
+        let pkgs = nixpkgs.legacyPackages.${system}; in {
+          default = pkgs.mkShell {
+            packages = with pkgs; [ cargo rustc rustfmt clippy rust-analyzer sqlite pkg-config ];
+            env.RUST_LOG = "info";
+          };
+        });
+
+      checks = forAllSystems (system: {
+        default = self.packages.${system}.default;
+      });
+    };
+}
